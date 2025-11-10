@@ -1,76 +1,194 @@
+// alu_tb.sv (no coverage)
+// Self-checking testbench for alu.sv
+// - Golden model
+// - Exhaustive over A, B, op
+// - Assertions for Y and carry only
+
 `timescale 1ns/1ps
 
 module alu_tb;
 
-  // DUT signals
-  logic [3:0] tb_a, tb_b;
-  logic [3:0] tb_op;
-  logic [3:0] tb_result;
+  localparam int W = 8;
 
-  // Instantiate DUT
-  alu dut (
-    .input_a(tb_a),
-    .input_b(tb_b),
-    .alu_op(tb_op),
-    .result(tb_result)
+  // Opcode mapping (must match alu.sv)
+  localparam logic [3:0]
+    OP_ADD  = 4'h0,
+    OP_SUB  = 4'h1,
+    OP_AND  = 4'h2,
+    OP_OR   = 4'h3,
+    OP_XOR  = 4'h4,
+    OP_XNOR = 4'h5,
+    OP_SLL  = 4'h6,
+    OP_SRL  = 4'h7,
+    OP_ROL  = 4'h8,
+    OP_ROR  = 4'h9,
+    OP_GT   = 4'hA,
+    OP_EQ   = 4'hB,
+    OP_MUL  = 4'hC,
+    OP_DIV  = 4'hD,
+    OP_CLR  = 4'hE,
+    OP_PASS = 4'hF;
+
+  // DUT I/O
+  logic [W-1:0] A, B;
+  logic [3:0]   op;
+  logic [W-1:0] Y;
+  logic         carry;
+
+  int errors = 0;
+  int total  = 0;
+
+  // DUT
+  alu #(.W(W)) dut (
+    .A(A),
+    .B(B),
+    .op(op),
+    .Y(Y),
+    .carry(carry)
   );
 
-  // Simple reference model
-  function automatic logic [3:0] ref_model(
-    input logic [3:0] A, B,
-    input logic [3:0] OP
+  // Expected bundle
+  typedef struct packed {
+    logic [W-1:0] y;
+    logic         c;
+  } alu_exp_t;
+
+  // Golden model
+  function automatic alu_exp_t golden(
+    input logic [W-1:0] a,
+    input logic [W-1:0] b,
+    input logic [3:0]   op_i
   );
-    logic [3:0] R;
-    logic [1:0] shamt = B[1:0];
-    case (OP)
-      4'b0000: R = A + B;                      // ADD
-      4'b0001: R = A - B;                      // SUB
-      4'b0010: R = A & B;                      // AND
-      4'b0011: R = A | B;                      // OR
-      4'b0100: R = A ^ B;                      // XOR
-      4'b0101: R = ~A;                         // NOT
-      4'b0110: R = A << shamt;                 // SLL
-      4'b0111: R = A >> shamt;                 // SRL
-      4'b1000: R = {3'b000, (A == B)};         // EQ
-      4'b1001: R = {3'b000, ($signed(A) < $signed(B))}; // SLT
-      default: R = 4'b0000;
+    alu_exp_t       r;
+    logic [W:0]     add_ext;
+    logic [W:0]     sub_ext;
+    logic [2*W-1:0] mul_full;
+
+    r        = '{default:'0};
+    add_ext  = '0;
+    sub_ext  = '0;
+    mul_full = '0;
+
+    unique case (op_i)
+
+      OP_ADD: begin
+        add_ext = {1'b0, a} + {1'b0, b};
+        r.y     = add_ext[W-1:0];
+        r.c     = add_ext[W];
+      end
+
+      OP_SUB: begin
+        sub_ext = {1'b0, a} - {1'b0, b};
+        r.y     = sub_ext[W-1:0];
+        r.c     = sub_ext[W];   // 1 = no borrow (unsigned)
+      end
+
+      OP_AND : r.y = a & b;
+      OP_OR  : r.y = a | b;
+      OP_XOR : r.y = a ^ b;
+      OP_XNOR: r.y = ~(a ^ b);
+
+      OP_SLL: begin
+        r.y = a << 1;
+        r.c = a[W-1];
+      end
+
+      OP_SRL: begin
+        r.y = a >> 1;
+        r.c = a[0];
+      end
+
+      OP_ROL: begin
+        r.y = {a[W-2:0], a[W-1]};
+        r.c = a[W-1];
+      end
+
+      OP_ROR: begin
+        r.y = {a[0], a[W-1:1]};
+        r.c = a[0];
+      end
+
+      OP_GT: begin
+        r.y = (a > b) ? {{W-1{1'b0}}, 1'b1} : '0;
+      end
+
+      OP_EQ: begin
+        r.y = (a == b) ? {{W-1{1'b0}}, 1'b1} : '0;
+      end
+
+      OP_MUL: begin
+        mul_full = a * b;
+        r.y      = mul_full[W-1:0];
+        r.c      = |mul_full[2*W-1:W]; // overflow into upper bits
+      end
+
+      OP_DIV: begin
+        if (b != '0) r.y = a / b;
+        else         r.y = '0;         // div-by-zero handled as 0
+      end
+
+      OP_CLR:  r.y = '0;
+      OP_PASS: r.y = a;
+
+      default: r.y = '0;
     endcase
-    return R;
+
+    return r;
   endfunction
 
-  // Checker task
-  task automatic check_case(string tag);
-    logic [3:0] expected = ref_model(tb_a, tb_b, tb_op);
-    if (tb_result !== expected) begin
-      $error("[FAIL] %s A=%0h B=%0h op=%0b DUT=%0h EXP=%0h",
-             tag, tb_a, tb_b, tb_op, tb_result, expected);
-      $fatal;
-    end
+  // Drive one vector and check
+  task automatic drive_and_check(
+    input logic [W-1:0] a,
+    input logic [W-1:0] b,
+    input logic [3:0]   op_i
+  );
+    alu_exp_t exp;
+
+    A  = a;
+    B  = b;
+    op = op_i;
+
+    #1; // combinational settle
+
+    exp = golden(a, b, op_i);
+    total++;
+
+    assert (Y === exp.y)
+      else begin
+        $error("Y mismatch op=%0h A=%0h B=%0h  dut=%0h exp=%0h",
+               op_i, a, b, Y, exp.y);
+        errors++;
+      end
+
+    assert (carry === exp.c)
+      else begin
+        $error("carry mismatch op=%0h A=%0h B=%0h  dut=%0b exp=%0b",
+               op_i, a, b, carry, exp.c);
+        errors++;
+      end
   endtask
 
-  // Stimulus
+  // Exhaustive test
   initial begin
-    // Directed tests
-    tb_a=4'h0; tb_b=4'h0; tb_op=4'b0000; #1; check_case("ADD 0+0");
-    tb_a=4'hF; tb_b=4'h1; tb_op=4'b0000; #1; check_case("ADD wrap");
-    tb_a=4'h8; tb_b=4'h1; tb_op=4'b0001; #1; check_case("SUB");
-    tb_a=4'hA; tb_b=4'h5; tb_op=4'b0010; #1; check_case("AND");
-    tb_a=4'hA; tb_b=4'h5; tb_op=4'b0011; #1; check_case("OR");
-    tb_a=4'hF; tb_b=4'h0; tb_op=4'b0101; #1; check_case("NOT");
-    tb_a=4'h9; tb_b=4'h1; tb_op=4'b0110; #1; check_case("SLL");
-    tb_a=4'h9; tb_b=4'h1; tb_op=4'b0111; #1; check_case("SRL");
-    tb_a=4'sh8; tb_b=4'sh7; tb_op=4'b1001; #1; check_case("SLT");
-    tb_a=4'h5; tb_b=4'h5; tb_op=4'b1000; #1; check_case("EQ");
+    $display("ALU TB: start");
 
-    // Random test
-    for (int i=0; i<20; i++) begin
-      tb_a  = $urandom_range(0, 15);
-      tb_b  = $urandom_range(0, 15);
-      tb_op = $urandom_range(0, 9);
-      #1; check_case("RANDOM");
+    for (int o = OP_ADD; o <= OP_PASS; o++) begin
+      for (int a = 0; a < (1<<W); a++) begin
+        for (int b = 0; b < (1<<W); b++) begin
+          drive_and_check(a[W-1:0], b[W-1:0], (o[3:0]));
+        end
+      end
     end
 
-    $display("[PASS] All ALU tests passed.");
+    $display("Vectors run : %0d", total);
+
+    if (errors == 0) begin
+      $display("ALU TB: all checks passed");
+    end else begin
+      $display("ALU TB: %0d error(s)", errors);
+      $fatal;
+    end
+
     $finish;
   end
 
