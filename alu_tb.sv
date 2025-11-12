@@ -1,8 +1,6 @@
-// alu_tb.sv (no coverage)
+// alu_tb.sv 
 // Self-checking testbench for alu.sv
-// - Golden model
-// - Exhaustive over A, B, op
-// - Assertions for Y and carry only
+
 
 `timescale 1ns/1ps
 
