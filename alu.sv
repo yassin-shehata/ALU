@@ -1,6 +1,4 @@
 // alu.sv
-// Parameterized combinational ALU.
-// Interface: A, B, op -> Y, carry
 
 `timescale 1ns/1ps
 
